@@ -1,0 +1,25 @@
+title: Thực thi tiến trình dưới quyền tài khoản web server (www-data) — nghi ngờ Web Shell
+id: 7c9a1d4e-2b3c-4a5d-9e0f-1a2b3c4d5e6f
+status: experimental
+description: >
+  Auditd trên máy chủ web ghi nhận execve gắn với euid của tài khoản web server
+  (www-data, uid 33), hoặc gắn tag key=webshell_exec (từ rule auditd chuyên dụng
+  cài trong audit-rules/siem-webshell.rules) — dấu hiệu điển hình của web shell
+  hoặc RCE (remote code execution) qua ứng dụng web (php-fpm/nginx spawn shell).
+references:
+  - internal
+author: siem-box
+date: 2026/09/22
+logsource:
+  product: linux
+  service: auditd
+detection:
+  selection_key:
+    key: webshell_exec
+  selection_euid:
+    user.effective.id: '33'
+  condition: selection_key or selection_euid
+falsepositives:
+  - Tác vụ hệ thống hợp lệ chạy dưới www-data (hiếm — các tác vụ này thường
+    không gọi execve tới shell/interpreter)
+level: high

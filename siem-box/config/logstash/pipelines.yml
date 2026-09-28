@@ -1,0 +1,37 @@
+#=================
+#   pipelines.yml
+#=================
+# Mỗi nguồn log = 1 pipeline độc lập, tách batch/worker riêng.
+# Quy ước đặt tên bắt buộc để tránh lệch giữa Kafka topic <-> ES index <-> Kibana Data View:
+#   Kafka topic  =  logs-<source>-default
+#   ES index     =  logs-<source>-default   (KHÔNG dùng tiền tố khác, vd "bench-")
+#   Data View    =  logs-<source>-default*
+#
+# Thêm nguồn mới: copy 1 file .conf trong pipeline/, đổi topic+index theo đúng quy ước trên,
+# thêm 1 block bên dưới, rồi thêm tên nguồn vào utils/create-data-views.sh
+
+- pipeline.id: nginx
+  path.config: "/usr/share/logstash/pipeline/nginx.conf"
+  pipeline.workers: 2
+  pipeline.batch.size: 125
+  pipeline.batch.delay: 50
+
+- pipeline.id: linux-auth
+  path.config: "/usr/share/logstash/pipeline/linux-auth.conf"
+  pipeline.workers: 1
+  pipeline.batch.size: 50
+  pipeline.batch.delay: 50
+
+- pipeline.id: linux-auditd
+  path.config: "/usr/share/logstash/pipeline/linux-auditd.conf"
+  pipeline.workers: 1
+  pipeline.batch.size: 50
+  pipeline.batch.delay: 50
+
+# Ví dụ thêm nguồn mới (copy 1 block ở trên, đổi id/path, rồi tạo file .conf
+# tương ứng trong pipeline/):
+# - pipeline.id: <source>
+#   path.config: "/usr/share/logstash/pipeline/<source>.conf"
+#   pipeline.workers: 1
+#   pipeline.batch.size: 50
+#   pipeline.batch.delay: 50

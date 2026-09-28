@@ -1,0 +1,238 @@
+name: siem-box
+
+networks:
+  siem-net:
+    driver: bridge
+
+volumes:
+  certs:
+  es-data:
+  kibana-data:
+  kafka-data:
+  rule-engine-data:
+
+services:
+
+  # ---------------------------------------------------------
+  # SETUP — chạy 1 lần: tự sinh CA + chứng chỉ cho es01/kibana,
+  # set mật khẩu kibana_system. Container tự thoát sau khi xong.
+  # ---------------------------------------------------------
+  setup:
+    container_name: siem-setup
+    image: docker.elastic.co/elasticsearch/elasticsearch:${STACK_VERSION}
+    user: "0"
+    volumes:
+      - certs:/usr/share/elasticsearch/config/certs
+      - ./utils/setup-certs.sh:/usr/share/elasticsearch/setup-certs.sh:ro
+    environment:
+      - ELASTIC_PASSWORD=${ELASTIC_PASSWORD}
+      - KIBANA_PASSWORD=${KIBANA_PASSWORD}
+      - SIEM_EXTERNAL_HOST=${SIEM_EXTERNAL_HOST}
+    command: bash /usr/share/elasticsearch/setup-certs.sh
+    healthcheck:
+      test: ["CMD-SHELL", "[ -f config/certs/es01/es01.crt ] && [ -f config/certs/kibana/kibana.crt ]"]
+      interval: 2s
+      timeout: 5s
+      retries: 150
+    networks:
+      - siem-net
+
+  # ---------------------------------------------------------
+  # ELASTICSEARCH (TLS bắt buộc, single-node)
+  # ---------------------------------------------------------
+  es01:
+    container_name: siem-es01
+    depends_on:
+      setup:
+        condition: service_healthy
+    image: docker.elastic.co/elasticsearch/elasticsearch:${STACK_VERSION}
+    volumes:
+      - certs:/usr/share/elasticsearch/config/certs
+      - es-data:/usr/share/elasticsearch/data
+    ports:
+      - "${ES_PORT}:9200"
+    environment:
+      - node.name=es01
+      - cluster.name=${CLUSTER_NAME}
+      - discovery.type=single-node
+      - ELASTIC_PASSWORD=${ELASTIC_PASSWORD}
+      - bootstrap.memory_lock=true
+      - xpack.security.enabled=true
+      - xpack.security.http.ssl.enabled=true
+      - xpack.security.http.ssl.key=certs/es01/es01.key
+      - xpack.security.http.ssl.certificate=certs/es01/es01.crt
+      - xpack.security.http.ssl.certificate_authorities=certs/ca/ca.crt
+      - xpack.security.transport.ssl.enabled=true
+      - xpack.security.transport.ssl.key=certs/es01/es01.key
+      - xpack.security.transport.ssl.certificate=certs/es01/es01.crt
+      - xpack.security.transport.ssl.certificate_authorities=certs/ca/ca.crt
+      - xpack.security.transport.ssl.verification_mode=certificate
+      - xpack.license.self_generated.type=${LICENSE}
+      - ES_JAVA_OPTS=${ES_JAVA_OPTS}
+    mem_limit: ${ES_MEM_LIMIT}
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    networks:
+      - siem-net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s --cacert config/certs/ca/ca.crt https://localhost:9200 | grep -q 'missing authentication credentials'"]
+      interval: 10s
+      timeout: 10s
+      retries: 60
+      start_period: 30s
+
+  # ---------------------------------------------------------
+  # KIBANA (TLS bắt buộc)
+  # ---------------------------------------------------------
+  kibana:
+    container_name: siem-kibana
+    depends_on:
+      es01:
+        condition: service_healthy
+    image: docker.elastic.co/kibana/kibana:${STACK_VERSION}
+    volumes:
+      - certs:/usr/share/kibana/config/certs
+      - kibana-data:/usr/share/kibana/data
+      - ./config/kibana.yml:/usr/share/kibana/config/kibana.yml:ro
+    ports:
+      - "${KIBANA_PORT}:5601"
+    environment:
+      - SERVERNAME=kibana
+      - SIEM_EXTERNAL_HOST=${SIEM_EXTERNAL_HOST}
+      - KIBANA_PORT=${KIBANA_PORT}
+      - ELASTICSEARCH_HOSTS=https://es01:9200
+      - ELASTICSEARCH_USERNAME=kibana_system
+      - ELASTICSEARCH_PASSWORD=${KIBANA_PASSWORD}
+      - ELASTICSEARCH_SSL_CERTIFICATEAUTHORITIES=config/certs/ca/ca.crt
+      - XPACK_SECURITY_ENCRYPTIONKEY=${ENCRYPTION_KEY}
+      - XPACK_ENCRYPTEDSAVEDOBJECTS_ENCRYPTIONKEY=${ENCRYPTION_KEY}
+      - XPACK_REPORTING_ENCRYPTIONKEY=${ENCRYPTION_KEY}
+      - SERVER_SSL_ENABLED=true
+      - SERVER_SSL_CERTIFICATE=config/certs/kibana/kibana.crt
+      - SERVER_SSL_KEY=config/certs/kibana/kibana.key
+    mem_limit: ${KIBANA_MEM_LIMIT}
+    networks:
+      - siem-net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -I -s --cacert config/certs/ca/ca.crt https://localhost:5601 | grep -q 'HTTP/1.1 302\\|HTTP/2 302'"]
+      interval: 10s
+      timeout: 10s
+      retries: 60
+      start_period: 30s
+
+  # ---------------------------------------------------------
+  # KAFKA (KRaft, không TLS — nằm trong docker-net cô lập.
+  # Xem README mục "Về việc Kafka không có TLS" để hiểu đánh đổi.)
+  # ---------------------------------------------------------
+  kafka:
+    container_name: siem-kafka
+    image: bitnamilegacy/kafka:${KAFKA_VERSION}
+    volumes:
+      - kafka-data:/bitnami
+    ports:
+      - "${KAFKA_EXTERNAL_PORT}:9094"
+    environment:
+      - KAFKA_ENABLE_KRAFT=yes
+      - KAFKA_CFG_NODE_ID=1
+      - KAFKA_CFG_PROCESS_ROLES=broker,controller
+      - KAFKA_CFG_CONTROLLER_QUORUM_VOTERS=1@kafka:9093
+      - KAFKA_CFG_LISTENERS=INTERNAL://:9092,EXTERNAL://:9094,CONTROLLER://:9093
+      # advertised EXTERNAL dùng đúng biến SIEM_EXTERNAL_HOST — cùng nguồn sự thật với SAN của cert
+      - KAFKA_CFG_ADVERTISED_LISTENERS=INTERNAL://kafka:9092,EXTERNAL://${SIEM_EXTERNAL_HOST}:${KAFKA_EXTERNAL_PORT}
+      - KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP=INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+      - KAFKA_CFG_CONTROLLER_LISTENER_NAMES=CONTROLLER
+      - KAFKA_CFG_INTER_BROKER_LISTENER_NAME=INTERNAL
+      - KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE=true
+      - KAFKA_CFG_OFFSETS_TOPIC_REPLICATION_FACTOR=1
+      - KAFKA_CFG_TRANSACTION_STATE_LOG_MIN_ISR=1
+      - KAFKA_CFG_TRANSACTION_STATE_LOG_REPLICATION_FACTOR=1
+    mem_limit: ${KAFKA_MEM_LIMIT}
+    networks:
+      - siem-net
+    healthcheck:
+      test: ["CMD-SHELL", "bash -lc 'echo > /dev/tcp/127.0.0.1/9092'"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+  # ---------------------------------------------------------
+  # KAFKA UI — tuỳ chọn, xoá service này nếu muốn stack tối giản hơn nữa.
+  # ---------------------------------------------------------
+  kafka-ui:
+    container_name: siem-kafka-ui
+    image: provectuslabs/kafka-ui:latest
+    depends_on:
+      kafka:
+        condition: service_healthy
+    ports:
+      - "${KAFKA_UI_PORT}:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: siem-box
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+    mem_limit: ${KAFKA_UI_MEM_LIMIT}
+    networks:
+      - siem-net
+
+  # ---------------------------------------------------------
+  # LOGSTASH (multi-pipeline, output TLS vào es01)
+  # ---------------------------------------------------------
+  logstash:
+    container_name: siem-logstash
+    image: docker.elastic.co/logstash/logstash:${STACK_VERSION}
+    user: "0"
+    depends_on:
+      kafka:
+        condition: service_healthy
+      es01:
+        condition: service_healthy
+    restart: unless-stopped
+    environment:
+      - LS_JAVA_OPTS=${LS_JAVA_OPTS}
+      - ELASTIC_USER=elastic
+      - ELASTIC_PASSWORD=${ELASTIC_PASSWORD}
+    volumes:
+      - certs:/certs:ro
+      # ĐÚNG tên file bắt buộc: pipelines.yml (Logstash chỉ nhận diện tên này)
+      - ./config/logstash/pipelines.yml:/usr/share/logstash/config/pipelines.yml:ro
+      - ./config/logstash/pipeline:/usr/share/logstash/pipeline:ro
+      - ./config/logstash/logstash.yml:/usr/share/logstash/config/logstash.yml:ro
+    mem_limit: ${LOGSTASH_MEM_LIMIT}
+    networks:
+      - siem-net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s http://localhost:9600/_node/pipelines | grep -q pipelines"]
+      interval: 15s
+      timeout: 10s
+      retries: 30
+      start_period: 30s
+
+  # ---------------------------------------------------------
+  # RULE-ENGINE — đọc rule Sigma (rules/sigma/), convert sang Lucene query,
+  # poll Elasticsearch định kỳ, ghi alert vào index siem-alerts-default.
+  # Xem rule-engine/engine.py.
+  # ---------------------------------------------------------
+  rule-engine:
+    container_name: siem-rule-engine
+    build: ./rule-engine
+    depends_on:
+      es01:
+        condition: service_healthy
+    restart: unless-stopped
+    environment:
+      - ES_HOST=https://es01:9200
+      - ES_USER=elastic
+      - ES_PASSWORD=${ELASTIC_PASSWORD}
+      - ES_CA_CERT=/certs/ca/ca.crt
+      - ALERTS_INDEX=siem-alerts-default
+      - RULES_DIR=/rules/sigma
+      - STATE_FILE=/data/state.json
+      - POLL_INTERVAL=60
+      - INITIAL_LOOKBACK_MINUTES=15
+    volumes:
+      - certs:/certs:ro
+      - ./rules/sigma:/rules/sigma:ro
+      - rule-engine-data:/data
+    networks:
+      - siem-net

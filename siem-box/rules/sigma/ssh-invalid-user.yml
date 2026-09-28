@@ -1,0 +1,20 @@
+title: SSH Login With Invalid/Non-Existent User
+id: 3e2b3e2a-6f9b-4e0a-9c1a-a1b2c3d4e5f6
+status: experimental
+description: >
+  Phát hiện cố gắng đăng nhập SSH với username không tồn tại trên hệ thống —
+  dấu hiệu điển hình của brute-force hoặc dò quét tài khoản.
+references:
+  - internal
+author: siem-box
+date: 2026/09/22
+logsource:
+  product: linux
+  service: auth
+detection:
+  selection:
+    auth.message|contains: 'Invalid user'
+  condition: selection
+falsepositives:
+  - Gõ nhầm username hợp lệ (hiếm, và thường không lặp lại nhiều lần)
+level: medium

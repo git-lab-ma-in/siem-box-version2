@@ -1,0 +1,3 @@
+server.host: "0.0.0.0"
+server.publicBaseUrl: "https://${SIEM_EXTERNAL_HOST}:${KIBANA_PORT}"
+telemetry.enabled: false
